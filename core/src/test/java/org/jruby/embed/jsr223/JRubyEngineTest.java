@@ -39,6 +39,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.*;
 import javax.script.Bindings;
 import javax.script.CompiledScript;
 import javax.script.ScriptContext;
@@ -858,6 +859,93 @@ public class JRubyEngineTest extends BaseTest {
             }
         }
     }
+    
+    @Test
+    public void testConcurrentLocalContextBehavior() throws Exception
+	{
+        // Error after a few iterations
+        final ScriptEngine _jruby = newScriptEngine("concurrent", "transient");
+        
+        // No error
+        //final ScriptEngine _jruby = newScriptEngine("singleton", "transient");
+        
+        final Bindings defaultBindings = _jruby.createBindings();
+        Map<String, Object> bindingsMap = new ConcurrentHashMap<>();
+        bindingsMap.put("$fooBarUtils", new FooBarUtils());
+        defaultBindings.putAll(bindingsMap);
+        _jruby.setBindings(defaultBindings, ScriptContext.ENGINE_SCOPE);
+        
+        String barFilename = basedir + "/core/src/test/ruby/org/jruby/embed/ruby/call_bar_utils.rb";
+        Reader barReader = new FileReader(barFilename);
+        _jruby.eval(barReader);
+        
+        String fooFilename = basedir + "/core/src/test/ruby/org/jruby/embed/ruby/call_foo_utils.rb";
+        Reader fooReader = new FileReader(fooFilename);
+        _jruby.eval(fooReader);
+        
+        Invocable invocable = (Invocable) _jruby;
+        
+        for (int j = 0; j < 500; j++)
+		{
+            System.out.println("Iteration " + j);
+			int numberOfThreads = 10;
+			ExecutorService executorService = Executors.newFixedThreadPool(numberOfThreads);
+			CountDownLatch latchBar = new CountDownLatch(numberOfThreads);
+			List<Future<String>> futuresBar = new ArrayList<>();
+			
+			for (int i = 0; i < numberOfThreads; i++)
+			{
+				Future<String> future = executorService.submit(() -> {
+					try
+					{
+						latchBar.countDown();
+						latchBar.await();
+						
+						return (String) invocable.invokeFunction("call_bar");
+					}
+					catch (Exception e)
+					{
+						throw new RuntimeException(e);
+					}
+				});
+				futuresBar.add(future);
+			}
+			
+			CountDownLatch latchFoo = new CountDownLatch(numberOfThreads);
+			List<Future<String>> futuresFoo = new ArrayList<>();
+			
+			for (int i = 0; i < numberOfThreads; i++)
+			{
+				Future<String> future = executorService.submit(() -> {
+					try
+					{
+						latchFoo.countDown();
+						latchFoo.await();
+						
+						return (String) invocable.invokeFunction("call_foo");
+					}
+					catch (Exception e)
+					{
+						throw new RuntimeException(e);
+					}
+				});
+				futuresFoo.add(future);
+			}
+			
+			executorService.shutdown();
+			assertTrue(executorService.awaitTermination(30, TimeUnit.SECONDS));
+			
+			for (Future<String> futureFoo : futuresFoo)
+			{
+				assertEquals("foo", futureFoo.get());
+			}
+			
+			for (Future<String> futureBar : futuresBar)
+			{
+				assertEquals("bar", futureBar.get());
+			}
+		}
+	}
 
     private static BiVariableMap getVarMap(final ScriptEngine engine) {
         return ((JRubyEngine) engine).container.getVarMap();
